@@ -7,7 +7,15 @@ from datetime import timedelta
 import discord
 from discord import app_commands
 from discord.ext import commands
-from google import genai
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+try:
+    from google import genai
+except ImportError:
+    genai = None
 
 # ==============================================================================
 # 1. VIEW COMPONENTS (TICKETS & GAMES)
@@ -16,7 +24,7 @@ from google import genai
 class TicketButtonView(discord.ui.View):
     """Persistent view for handling support tickets."""
     def __init__(self):
-        super().__init__(timeout=None)  # Keeps button active after bot reboots
+        super().__init__(timeout=None)
 
     @discord.ui.button(label="Create Support Ticket", style=discord.ButtonStyle.primary, custom_id="open_ticket_btn", emoji="🎫")
     async def create_ticket_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -39,7 +47,6 @@ class GameLaunchView(discord.ui.View):
 
     @discord.ui.button(label="Initialize Server Match Grid", style=discord.ButtonStyle.success)
     async def start_game_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Unlock the channel where the game is played
         await self.target_channel.set_permissions(self.guild.default_role, send_messages=True)
         await self.target_channel.send("🎯 **The Secret Guessing Game has started!** Guess the number (1-100) right here in this channel!")
         await interaction.response.edit_message(content="Game engine deployed. Live updates streaming to target channel.", view=None)
@@ -55,7 +62,6 @@ class GameLaunchView(discord.ui.View):
                 if msg.content.isdigit() and int(msg.content) == self.secret_number:
                     await msg.add_reaction("✅")
                     await self.target_channel.send(f"🎉 **{msg.author.mention}** guessed the exact correct number: **{self.secret_number}**! Locking channel...")
-                    # Instantly lock the channel down to conclude the match safely
                     await self.target_channel.set_permissions(self.guild.default_role, send_messages=False)
                     break
             except asyncio.TimeoutError:
@@ -93,36 +99,34 @@ class AdvancedDiscordBot(commands.Bot):
         intents.reactions = True
         super().__init__(command_prefix="!", intents=intents)
         
-        # Initialize Gemini Engine Client
-        self.ai_client = genai.Client()
+        if genai:
+            self.ai_client = genai.Client()
+        else:
+            self.ai_client = None
         
-        # Extensible In-Memory Mock Database Store
-        self.db_welcome = {}       # {guild_id: {"channel": int, "text": str, "image": str}}
-        self.db_afk = {}           # {user_id: {"reason": str, "time": timestamp}}
-        self.db_no_prefix = set()  # {user_ids}
-        self.db_autoresponse = {}  # {trigger_phrase: response_string}
-        self.db_autoreaction = {}  # {trigger_phrase: emoji_string}
-        self.db_warns = {}         # {user_id: [{"reason": str, "mod": str, "time": timestamp}, ...]}
+        self.db_welcome = {}
+        self.db_afk = {}
+        self.db_no_prefix = set()
+        self.db_autoresponse = {}
+        self.db_autoreaction = {}
+        self.db_warns = {}
 
     async def setup_hook(self):
-        # Register persistent views globally on startup
         self.add_view(TicketButtonView())
         
-        # Bind structural group commands (Cogs) dynamically
         await self.add_cog(WelcomeCog(self))
         await self.add_cog(ModerationCog(self))
         await self.add_cog(GamesCog(self))
         await self.add_cog(OwnerCog(self))
         await self.add_cog(UtilityCog(self))
         
-        # Sync absolute slash structures globally across the API endpoint mapping
         await self.tree.sync()
         print("✅ Application (/) tree layout structures synced cleanly.")
 
 bot = AdvancedDiscordBot()
 
 # ==============================================================================
-# 3. INTERCEPTIVE EVENTS (AUTOMOD, AUTO-RESPONSE, AFK, NO PREFIX)
+# 3. INTERCEPTIVE EVENTS
 # ==============================================================================
 
 @bot.event
@@ -139,11 +143,10 @@ async def on_message(message: discord.Message):
     content = message.content
     content_lower = content.lower()
 
-    # --- NO PREFIX SYSTEM (AI Assistant Bypass Trigger) ---
     is_owner = message.guild.owner_id == message.author.id
     has_np = message.author.id in bot.db_no_prefix or is_owner
 
-    if has_np and content_lower.startswith("ai "):
+    if has_np and content_lower.startswith("ai ") and bot.ai_client:
         prompt = content[3:]
         try:
             response = bot.ai_client.models.generate_content(
@@ -156,7 +159,6 @@ async def on_message(message: discord.Message):
             await message.reply(f"❌ Failed to parse analytical sequence response through Gemini AI.\n**Error**: {str(e)}")
             return
 
-    # --- AFK STATE CONTEXT ENGINE ---
     if message.author.id in bot.db_afk:
         del bot.db_afk[message.author.id]
         await message.reply("👋 Welcome back! Your AFK status has been completely cleared.", delete_after=5)
@@ -166,7 +168,6 @@ async def on_message(message: discord.Message):
             data = bot.db_afk[mention.id]
             await message.reply(f"⚠️ {mention.name} is currently AFK: **{data['reason']}**")
 
-    # --- AUTOMATED RESPONDS & REACTIONS LISTENER ---
     if content_lower in bot.db_autoresponse:
         await message.reply(bot.db_autoresponse[content_lower])
     if content_lower in bot.db_autoreaction:
@@ -175,14 +176,11 @@ async def on_message(message: discord.Message):
         except Exception:
             pass
 
-    # --- HIGHLY REACTIVE AUTOMOD FILTER MATRICES ---
-    # Caps Locking Enforcement
     if len(content) > 10 and content.isupper():
         await message.delete()
         await message.channel.send(f"{message.author.mention}, disable caps-lock layout strings.", delete_after=3)
         return
 
-    # Links / Invite Link Stripping Patterns
     invite_regex = r"(https?://)?(www\.)?(discord\.(gg|io|me|li)|discordapp\.com/invite)/[^\s]+"
     link_regex = r"https?://[^\s]+"
 
@@ -191,17 +189,15 @@ async def on_message(message: discord.Message):
         await message.channel.send(f"{message.author.mention}, payload links/invites are blocked here.", delete_after=3)
         return
 
-    # Mass Pings Tracking
     if len(message.mentions) > 4:
         await message.delete()
         await message.channel.send(f"{message.author.mention}, do not exceed safe server user mention thresholds.", delete_after=3)
         return
 
-    # Process commands normally
     await bot.process_commands(message)
 
 # ==============================================================================
-# 4. EXECUTABLE COG MODULE ARRAYS (SLASH COMMAND GROUPINGS)
+# 4. EXECUTABLE COG MODULE ARRAYS
 # ==============================================================================
 
 class WelcomeCog(commands.GroupCog, name="welcome"):
@@ -590,7 +586,7 @@ class UtilityCog(commands.GroupCog, name="util"):
         user = user or interaction.user
         
         embed = discord.Embed(
-            title=f"👤 User Info: {user.name}",
+            title=f"���� User Info: {user.name}",
             color=user.color,
             timestamp=interaction.created_at
         )
@@ -670,8 +666,11 @@ class OwnerCog(commands.GroupCog, name="owner"):
         
         users = []
         for user_id in self.bot.db_no_prefix:
-            user = await self.bot.fetch_user(user_id)
-            users.append(user.mention)
+            try:
+                user = await self.bot.fetch_user(user_id)
+                users.append(user.mention)
+            except:
+                pass
         
         embed.description = "\n".join(users) if users else "None"
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -691,8 +690,13 @@ class OwnerCog(commands.GroupCog, name="owner"):
 # ==============================================================================
 
 if __name__ == "__main__":
-    # Pull Token credentials cleanly from environmental spaces
     token = os.getenv("DISCORD_TOKEN")
     if not token:
-        raise ValueError("❌ Critical System Configuration Fault: DISCORD_TOKEN variable is undefined.")
-    bot.run(token)
+        print("❌ ERROR: DISCORD_TOKEN not found in environment variables!")
+        print("Make sure you have a .env file with DISCORD_TOKEN set")
+        exit(1)
+    
+    try:
+        bot.run(token)
+    except Exception as e:
+        print(f"❌ Failed to start bot: {e}")
